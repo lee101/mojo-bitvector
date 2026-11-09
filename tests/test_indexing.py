@@ -36,9 +36,12 @@ def test_getitem_matches_upstream():
 def test_negative_index():
     a = mine("10110011")
     assert a[-1] == a[len(a) - 1]
-    with pytest.raises(IndexError):
+    # Upstream raises ValueError("index range error"), not IndexError:
+    # _getbit lines 1821-1822 raises ValueError for pos >= size or
+    # pos < -size, so the expected class here is ValueError.
+    with pytest.raises(ValueError):
         a[len(a)]
-    with pytest.raises(IndexError):
+    with pytest.raises(ValueError):
         a[-len(a) - 1]
 
 
@@ -58,7 +61,9 @@ def test_setitem_and_getitem_round_trip():
 def test_setitem_rejects_non_bits():
     with pytest.raises(ValueError):
         mine("1010")[0] = 2
-    with pytest.raises(IndexError):
+    # _setbit line 1809 raises ValueError("index range error"), so the
+    # out-of-range assignment is a ValueError, not an IndexError.
+    with pytest.raises(ValueError):
         mine("1010")[4] = 1
 
 

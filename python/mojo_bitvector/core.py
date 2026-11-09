@@ -25,6 +25,59 @@ def _words(size: int) -> np.ndarray:
     return np.zeros(_lib.words_for(size), dtype=np.uint16)
 
 
+def _validate_slice_bounds(pos: slice, n: int) -> None:
+    """Raise Upstream's ValueError for out-of-range slice bounds.
+
+    Upstream ``_getbit`` (lines 1830-1865) raises ValueError only for
+    bounds that go below 0 or above len(self) in the indexed branches;
+    the all-None and empty-vector branches return without touching the
+    bounds, so an empty vector's [0:2] slice does NOT raise upstream.
+    """
+    start, stop = pos.start, pos.stop
+    if start is None and stop is None:
+        return
+    if n == 0:
+        # Upstream's explicit empty check at lines 1867-1868 returns
+        # before the generic bound checks; all-empty slices are legal.
+        return
+    if start is None:
+        if stop >= 0:
+            if stop > n:
+                raise ValueError("illegal slice index values")
+        else:
+            if abs(stop) > n:
+                raise ValueError("illegal slice index values")
+        return
+    if stop is None:
+        if start >= 0:
+            if start > n:
+                raise ValueError("illegal slice index values")
+        else:
+            if abs(start) > n:
+                raise ValueError("illegal slice index values")
+        return
+    # both bounds supplied (covers negative combos that the upstream
+    # branches reject; the i > j check lives in __getitem__).
+    if start >= 0 and stop >= 0:
+        if start > n or stop > n:
+            raise ValueError("illegal slice index values")
+        return
+    if start < 0 and stop >= 0:
+        rs = n + start
+        if rs < 0 or rs > stop:
+            raise ValueError("illegal slice index values")
+        return
+    if start >= 0 and stop < 0:
+        rs = n + stop
+        if rs < start:
+            raise ValueError("illegal slice index values")
+        return
+    # both negative: fall through; resolved start > stop is checked
+    # in __getitem__.
+    if abs(start) > n or abs(stop) > n:
+        raise ValueError("illegal slice index values")
+
+
 def _coerce(other: "BitVector | int | bytes | str") -> "BitVector":
     if isinstance(other, BitVector):
         return other
@@ -42,7 +95,15 @@ def _coerce(other: "BitVector | int | bytes | str") -> "BitVector":
 
 
 class BitVector:
-    """Fixed-width bit vector backed by Mojo kernels."""
+    """Fixed-width bit vector backed by Mojo kernels.
+
+    Matches upstream ``BitVector.BitVector.BitVector`` error classes:
+    out-of-range indexing raises ``ValueError`` (upstream lines 1809-1810
+    ``_setbit`` and 1821-1822 ``_getbit`` both raise ``ValueError("index
+    range error")``) and out-of-range slicing raises ``ValueError``
+    ("illegal slice index values", lines 1833-1865), so this file raises
+    ``ValueError`` for those cases rather than Python's ``IndexError``.
+    """
 
     __slots__ = ("_size", "_w")
 
@@ -74,11 +135,22 @@ class BitVector:
         elif rawbytes is not None:
             self._from_bytes(rawbytes)
         elif size is not None:
+            # Matches upstream constructor: size must be an int; a float
+            # size (upstream raises TypeError) must not truncate to int.
+            if isinstance(size, float) and not size.is_integer():
+                raise TypeError("size must be an integer")
+            if not isinstance(size, int):
+                raise TypeError("size must be an integer")
             if size < 0:
                 raise ValueError("size must be non-negative")
             self._size = int(size)
             self._w = _words(self._size)
             if intVal:
+                if isinstance(intVal, float):
+                    # Matches upstream intVal handling (TypeError on float).
+                    raise TypeError(
+                        "'float' object cannot be interpreted as an integer"
+                    )
                 self._load_int(int(intVal))
         else:
             raise ValueError("wrong arg(s) for constructor")
@@ -114,6 +186,12 @@ class BitVector:
 
     @classmethod
     def from_int(cls, value: int, size: int | None = None) -> "BitVector":
+        # Matches upstream intVal: a float value raises TypeError (upstream
+        # hex parsing in __init__ raises TypeError on a float intVal).
+        if isinstance(value, float):
+            raise TypeError(
+                "'float' object cannot be interpreted as an integer"
+            )
         if value < 0:
             raise ValueError("value must be non-negative")
         if size is None:
@@ -237,6 +315,12 @@ class BitVector:
     def __lshift__(self, n: int) -> "BitVector":
         if self._size == 0:
             raise ValueError("circular shift of an empty vector makes no sense")
+        if isinstance(n, float):
+            # Matches upstream __lshift__ (range(n) raises TypeError on a
+            # float); without this, NaN would fall through to ctypes.
+            raise TypeError(
+                "'float' object cannot be interpreted as an integer"
+            )
         if n < 0:
             return self >> abs(n)
         out = self._spawn(self._size)
@@ -246,6 +330,11 @@ class BitVector:
     def __rshift__(self, n: int) -> "BitVector":
         if self._size == 0:
             raise ValueError("circular shift of an empty vector makes no sense")
+        if isinstance(n, float):
+            # Matches upstream __rshift__ (range(n) raises TypeError).
+            raise TypeError(
+                "'float' object cannot be interpreted as an integer"
+            )
         if n < 0:
             return self << abs(n)
         out = self._spawn(self._size)
@@ -259,15 +348,32 @@ class BitVector:
         return self >> 1
 
     def shift_left(self, n: int) -> "BitVector":
+        # Matches upstream shift_left: range(n) with negative n runs zero
+        # iterations, so the vector is unchanged (identity).
+        if isinstance(n, float):
+            # Matches upstream shift_left (range(n) TypeError); without
+            # this, NaN would silently hit the identity branch.
+            raise TypeError(
+                "'float' object cannot be interpreted as an integer"
+            )
         out = self._spawn(self._size)
-        if self._size:
+        if self._size and n > 0:
             _lib.lib.bv_shift(_lib.addr(self._w), self._size, n, 1, _lib.addr(out._w))
+        elif self._size:
+            out._w = self._w.copy()
         return out
 
     def shift_right(self, n: int) -> "BitVector":
+        # Matches upstream shift_right: range(n) with negative n is identity.
+        if isinstance(n, float):
+            raise TypeError(
+                "'float' object cannot be interpreted as an integer"
+            )
         out = self._spawn(self._size)
-        if self._size:
+        if self._size and n > 0:
             _lib.lib.bv_shift(_lib.addr(self._w), self._size, n, 0, _lib.addr(out._w))
+        elif self._size:
+            out._w = self._w.copy()
         return out
 
     # -------------------------------------------------------------- counts ---
@@ -339,26 +445,67 @@ class BitVector:
 
     def __getitem__(self, pos):
         if isinstance(pos, slice):
-            start, stop, step = pos.indices(self._size)
-            if step != 1:
-                raise ValueError("bitvector slices must have step 1")
+            # Upstream _getbit ignores the slice step entirely (lines
+            # 1828-1873 never read pos.step), so any step returns the same
+            # start:stop slice. This port was raising ValueError for
+            # step != 1; that disagrees with upstream on [0:3:2] and
+            # [::-1], both of which upstream return a normal slice.
+            # Matches upstream _getbit: step is ignored, including the
+            # start/stop normalisation for negative steps.
+            step = 1
+            start, stop, _step = slice(pos.start, pos.stop, step).indices(
+                self._size
+            )
+            # Upstream raises ValueError("illegal slice index values")
+            # (lines 1832-1857) for out-of-range bounds and for start >
+            # stop; the port's slice.indices() normalisation silently
+            # clamped those cases. Validate against the raw slice.
+            _validate_slice_bounds(pos, self._size)
             length = max(0, stop - start)
+            # A reversed slice (start > stop) is illegal per upstream
+            # line 1856-1857.
+            if pos.start is not None and pos.stop is not None:
+                raw_start = pos.start if pos.start >= 0 else self._size + pos.start
+                raw_stop = pos.stop if pos.stop >= 0 else self._size + pos.stop
+                if raw_start > raw_stop:
+                    raise ValueError("illegal slice index values")
             out = self._spawn(length)
             if length:
                 _lib.lib.bv_slice_get(
                     _lib.addr(self._w), self._size, start, length, _lib.addr(out._w)
                 )
             return out
+        # Matches upstream _getbit line 1821: ValueError, not IndexError.
         idx = pos + self._size if pos < 0 else pos
         if idx < 0 or idx >= self._size:
-            raise IndexError("index range error")
+            raise ValueError("index range error")
         return int(_lib.lib.bv_getbit(_lib.addr(self._w), self._size, idx))
 
     def __setitem__(self, pos, item) -> None:
         if isinstance(pos, slice):
-            start, stop, step = pos.indices(self._size)
-            if step != 1:
-                raise ValueError("bitvector slices must have step 1")
+            # Matches upstream __setitem__ (lines 2477-2523): slice
+            # assignment steps are ignored upstream too; bounds are
+            # validated and a length mismatch raises ValueError.
+            # Deliberate port difference (README "Not implemented"): the
+            # branch at lines 2480-2481 ("return item.deep_copy()") is
+            # not reproduced, so [:] assigns instead of returning a copy.
+            if pos.start is None and pos.stop is None:
+                src = _coerce(item)
+                if src._size != self._size:
+                    raise ValueError(
+                        "slice assignment must preserve length in this port"
+                    )
+                if self._size:
+                    _lib.lib.bv_slice_set(
+                        _lib.addr(self._w), self._size, 0,
+                        _lib.addr(src._w), src._size,
+                    )
+                return
+            step = 1
+            start, stop, _step = slice(pos.start, pos.stop, step).indices(
+                self._size
+            )
+            _validate_slice_bounds(pos, self._size)
             length = max(0, stop - start)
             src = _coerce(item)
             if src._size != length:
@@ -374,9 +521,10 @@ class BitVector:
         val = int(item)
         if val not in (0, 1):
             raise ValueError("incorrect value for a bit")
+        # Matches upstream _setbit line 1809: ValueError, not IndexError.
         idx = pos + self._size if pos < 0 else pos
         if idx < 0 or idx >= self._size:
-            raise IndexError("index range error")
+            raise ValueError("index range error")
         _lib.lib.bv_setbit(_lib.addr(self._w), self._size, idx, val)
 
     # ------------------------------------------------------------ searching --
