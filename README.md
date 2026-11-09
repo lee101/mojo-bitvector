@@ -119,31 +119,56 @@ kernel. `upstream py` is the real `bitvector` package, for scale.
 
 | case | numpy uint16 | mojo-bitvector | vs numpy | upstream py |
 | --- | ---: | ---: | ---: | ---: |
-| xor, n=1048576 | 0.024 ms | 0.114 ms | 0.21x | 4461 ms |
-| count_bits, n=1048576 | 0.144 ms | 0.076 ms | 1.88x | 3754 ms |
-| rotate-left k=1, n=1048576 | 0.047 ms | 0.670 ms | 0.07x | 2639 ms |
-| shift-left k=1, n=1048576 | 0.016 ms | 0.184 ms | 0.09x | 1362 ms |
-| hamming, n=1048576 | 0.173 ms | 0.241 ms | 0.72x | 7151 ms |
-| next_set_bit, n=2097152 | 13.785 ms | 0.005 ms | 2525x | 6205 ms |
-| to_bytes, n=1048576 | — | 0.779 ms | — | 5.4 ms (Python) |
+| xor, n=1048576 | 0.016 ms | 0.071 ms | 0.23x | 1313 ms |
+| count_bits, n=1048576 | 0.143 ms | 0.039 ms | 3.68x | 1233 ms |
+| rotate-left k=1, n=1048576 | 0.051 ms | 0.329 ms | 0.16x | 611 ms |
+| shift-left k=1, n=1048576 | 0.014 ms | 0.112 ms | 0.13x | 647 ms |
+| hamming, n=1048576 | 0.125 ms | 0.115 ms | 1.10x | 1346 ms |
+| next_set_bit, n=2097152 | 6.249 ms | 0.004 ms | 1562x | 1256 ms |
+| to_bytes, n=1048576 | — | 0.764 ms | — | 3.9 ms (Python) |
+
+**VERIFY note (2026-11-09 session):** the three upstream numbers in the
+earlier table (4461 / 3754 / 2639 ms etc.) did not reproduce — see
+`bench/verify.md` — and were replaced above by the values measured in this
+session (best-of-3 in a fresh process, seeds 1–7 as in `bench/bench.py`,
+plus upstream re-measured at `/tmp/portb084/bitvector`). The `pixi run bench`
+output in this session was consistent with these within 20% for the numpy and
+mojo columns; the upstream column is `-` under `pixi run bench` because the
+package is not importable there, and the values above come from the probe
+that imports it directly.
+
+Benchmark audit (see `bench/verify.md` for the full findings): the `numpy
+uint16` numbers for rotate-left and shift-left in `bench/bench.py` are
+*proxies*, not like-for-like work — `np.roll` on a `uint8` view rolls by
+2 bytes (16 bits), and `w >> 0` is a no-op — so the `vs numpy` ratios for
+those two rows are optimistic for numpy and are kept only as a lower bound
+on the gap. `next_set_bit` in `bench/bench.py` times
+`tests/reference.py` (pure Python), not a numpy kernel, so its `vs numpy`
+label is also a proxy. The xor / count_bits / hamming numpy columns are
+exact (same 16-bit words, same input).
 
 Read honestly, this is a mixed result:
 
-- **The port wins against the real package by three to five orders of
-  magnitude**, which is the comparison a user of `bitvector` actually faces.
+- **The port wins against the real package by three orders of magnitude**
+  (measured in this session, e.g. xor 1313 ms -> 0.07 ms, ~1.9e4x; the
+  earlier "three to five orders" claim overstated the measured gap), which
+  is the comparison a user of `bitvector` actually faces.
   Every upstream number above is dominated by Python-level per-bit work.
-- **It wins against NumPy only on popcount** (1.88x), where `np.bitwise_count`
-  plus a `sum` pays two passes and the kernel pays one.
+- **It wins against NumPy on popcount** (3.68x in this session; the earlier
+  1.88x came from a different run), where `np.bitwise_count`
+  plus a `sum` pays two passes and the kernel pays one. In this session it
+  also wins on hamming (1.10x); that margin is within run-to-run noise and
+  should not be read as a win.
 - **It loses to NumPy on the memory-bound word operations.** A 16-bit XOR over
   128 KiB in and 128 KiB out is a pure bandwidth problem and NumPy reaches
   ~14 GB/s with SIMD; the kernel is a scalar 16-bit loop and reaches ~2 GB/s.
   A word-aligned fast path in `bv_binop` already bought 6.6x over the general
   path (0.78 ms -> 0.11 ms); getting the rest of the way needs a SIMD-width
   loop over `SIMD[DType.uint16]`, which this port does not do.
-- **Rotation is the worst case** (0.07x) because the general path calls the
-  two-word gather helper per word, and a rotation of a megabit is still one
-  pass. It is 0.0006 s against upstream's 2.6 s, so the port is the right
-  choice, but it is not the fast choice.
+- **Rotation is the worst case** (0.16x in this session) because the general
+  path calls the two-word gather helper per word, and a rotation of a
+  megabit is still one pass. It is 0.0003 s against upstream's 0.6 s, so
+  the port is the right choice, but it is not the fast choice.
 - `to_bytes` has no NumPy baseline: `np.packbits` would need a bit array 8x
   larger than the packed input, which is not the same work. Against the
   fastest pure-Python formulation (`int(bits, 2).to_bytes`) the kernel is 7x
@@ -181,7 +206,7 @@ structure with the kernels. `tests/test_*.py` assert against it, and again
 against the real `bitvector` package when it is importable.
 
 ```
-143 passed
+208 passed
 ```
 
 ## License
